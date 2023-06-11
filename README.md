@@ -21,6 +21,7 @@ This is why ZealFS is here!
 ## Features
 
 Here is a non-exhaustive list of the current features:
+
 * Features files and directories, no limit in depth.
 * Total storage size up to 64KB.
 * Names up to 16 characters.
@@ -40,19 +41,27 @@ This repository contains an implementation of ZealFS for Linux, in the form of a
 ### Dependencies
 
 In order to use the example you will need:
+
 * make
 * libfuse3-dev
 * gcc (or any other compatible C compiler)
 
-
 For example, on Ubuntu, you can install the main dependencies with:
+
 ```
 sudo apt install libfuse3-dev make
+```
+
+if you're on debian, run:
+
+```
+sudo apt install fuse3 libfuse3-dev make pkg-config
 ```
 
 ### Compilation
 
 To compile the project, type:
+
 ```
 make
 ```
@@ -68,16 +77,18 @@ In order to use the file system, you will need a disk image and a mount point. I
 ```
 
 This will create a new disk image named `my_disk.img` of size 64KB and mounted in the directory `my_mount_dir` present in the current folder. The binary should show:
+
 ```
 $ mkdir my_mount_dir
 $ ./zealfs --image=my_disk.img --size=64 my_mount_dir
 Info: using disk image my_disk.img
 $
 ```
+
 The binary is then running in background, the content of the disk image can be populated or checked either through the terminal or with a GUI file explorer, just like regular file systems.
 
-
 You can get all the possible parameters by using command:
+
 ```
 ./zealfs --help
 ```
@@ -85,6 +96,7 @@ You can get all the possible parameters by using command:
 ### Unmounting the disk image
 
 After using the disk image, you must unmount it thanks to the command:
+
 ```
 umount my_mount_dir
 ```
@@ -102,7 +114,6 @@ We can also say that the page number/index represents the upper 8-bit of the pag
 
 Pages are the smallest entities in the file system that can be allocated and freed. Thus, the smallest entities (files) are 256-byte big.
 
-
 The following diagram shows an example of the virtual pages on a 64KB disk:
 ![File System Pages](img/pages.jpg)
 
@@ -111,6 +122,7 @@ The following diagram shows an example of the virtual pages on a 64KB disk:
 The first page of the file system is reserved and **always** allocated: it's the header.
 
 It contains the following information:
+
 * Magic byte, `Z` in ASCII (`0x5A`)
 * Implementation revision/version
 * Bitmap size
@@ -133,7 +145,6 @@ The following bytes are currently unused but reserved for future use. They also 
 
 Finally, with the remaining space in the page, we can store file entries. These entries represent the root directory. Thus, the maximum number of entries we can have in the root directory is `256 - sizeof(header) / sizeof(entry) = 6`. This field is aligned on `sizeof(entry) = 32` bytes.
 
-
 This diagram shows the organization of header, which is located in the first page, page 0:
 ![File System Header](img/header.jpg)
 
@@ -146,6 +157,7 @@ As we have at most 256 pages on the disk, the bitmap size is `256/8 = 32` bytes.
 For example, the page starting at disk offset `0x9A00` is page number `0x98`, it is represented by bit `0x9a % 8 = 2` of byte `0x9a / 8 = 19` in the bitmap.
 
 In C, we can get its value with:
+
 ```C
 const uint8_t byte = 0x9a / 8;
 const uint8_t bit  = 0x9a % 8;
@@ -153,6 +165,7 @@ const uint8_t page_status = header->bitmap[byte] & (1 << bit);
 ```
 
 The following **must** be true at all time:
+
 * The number of 0 bits, marking a free page, in the whole bitmap is equal to the `free_pages` field from the header.
 * The first bit of the bitmap (bit 0, byte 0) is 1, as page 0 is always allocated, it contains the file system header.
 
@@ -166,6 +179,7 @@ In this example, the allocated pages are in red (bit is 1), and free pages are i
 All the directories in the file system have the same structure, they are composed of several entries: 6 for the root directory, 8 for other.
 
 Each entry is 32-byte long and composed of:
+
 * One byte of flags
 * Name of the file/directory, 16-char long
 * Page number where the content starts
@@ -177,6 +191,7 @@ The following diagram shows the structure of the entries:
 ![File System Entry](img/entry.jpg)
 
 Currently, the flag field is composed as followed:
+
 * Bit 7: 1 if the entry is occupied, 0 if the entry is free
 * *Bit 6..1: reserved/unused*
 * Bit 0: 1 if the entry is a directory, 0 if the entry is a file
@@ -200,6 +215,7 @@ Let's imagine this file is named `alphabet.txt` contains the pattern "ABC...XYZA
 ![File System Page Content](img/filecontent.jpg)
 
 ## License
+
 Distributed under the Apache 2.0 License. See LICENSE file for more information.
 
 You are free to use it for personal and commercial use, the boilerplate present in each file must not be removed.
