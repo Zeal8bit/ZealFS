@@ -34,7 +34,7 @@ static uint8_t *g_image;
 /**
  * Macro to help converting a page number into an address in the cache.
  */
-#define CONTENT_FROM_PAGE(page) ( g_image + (((int) page) << 8) )
+#define CONTENT_FROM_PAGE(header,page) ( g_image + (((int) (page)) << (8 + (header)->page_size )) )
 
 /* Options used with FUSE to parse the parameters given from the command line. */
 static struct options {
@@ -106,7 +106,9 @@ static uint64_t browse_path(const char * path, ZealFileEntry* entries, int root,
 {
     /* Store the current directory that is followed by '/' */
     char tmp_name[NAME_MAX_LEN + 1] = { 0 };
-    const int max_entries = root ? ROOT_MAX_ENTRIES : DIR_MAX_ENTRIES;
+    ZealFSHeader* header = (ZealFSHeader*) g_image;
+    const int max_entries = root ? getRootDirMaxEntries(header) :
+                                   getDirMaxEntries(header);
 
     /* Check the next path '/' */
     char* slash = strchr(path, '/');
@@ -136,8 +138,7 @@ static uint64_t browse_path(const char * path, ZealFileEntry* entries, int root,
                 return (uint64_t) &entries[i];
             } else {
                 /* Get the page of the current directory */
-                int page = entries[i].start_page << 8;
-                return browse_path(slash + 1, (ZealFileEntry*) (g_image + page), 0, free_entry);
+                return browse_path(slash + 1, (ZealFileEntry*) CONTENT_FROM_PAGE(header, entries[i].start_page), 0, free_entry);
             }
         }
     }
@@ -174,14 +175,25 @@ static int format(int file) {
     /* Initialize image header */
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     header->magic = 'Z';
-    header->version = 1;
-    /* Do not count the first page */
-    header->bitmap_size = options.size / 256 / 8;
-    /* Do not count the first page */
-    header->free_pages = options.size / 256 - 1;
+    /* Version 2 supports extended mode */
+    header->version = 2;
+    /* According to the size of the disk, we have to calculate the size of the pages */
+    const uint16_t page_size_bytes = pageSizeFromDiskSize(options.size);
+    /* The page size in the header is the log2(page_bytes/256) - 1 */
+    header->page_size = ((sizeof(int) * 8) - (__builtin_clz(page_size_bytes >> 8))) - 1;
+    header->bitmap_size = options.size / page_size_bytes / 8;
+    /* If the page size is 256, there will be only one page for the FAT */
+    const int fat_pages_count = 1 + (header->page_size == 256 ? 0 : 1);
+    /* Do not count the first page and the second page */
+    header->free_pages = options.size / page_size_bytes - 1 - fat_pages_count;
     /* All the pages are free (0), mark the first one as occupied */
-    header->pages_bitmap[0] = 1;
-    memset(header->reserved, 0, sizeof(header->reserved));
+    header->pages_bitmap[0] = 3 | ((fat_pages_count > 1) ? 4 : 0);
+
+    printf("Bitmap size: %d bytes\n", header->bitmap_size);
+    printf("Pages size: %d bytes (code %d)\n", page_size_bytes, ((page_size_bytes >> 8) - 1));
+    printf("Maximum root entries: %d\n", getRootDirMaxEntries(header));
+    printf("Maximum dir entries: %d\n", getDirMaxEntries(header));
+    printf("Header size/Root entries: %d (0x%x)\n", getFSHeaderSize(header), getFSHeaderSize(header));
 
     /* Flush the cache to the file. */
     lseek(g_fimg, 0, SEEK_SET);
@@ -199,7 +211,7 @@ int check_integrity(void)
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     /* Size of the file according to the bitmap */
-    const int image_size = header->bitmap_size * 8 * 256;
+    const int image_size = header->bitmap_size * 8 * getPageSize(header);
 
     if (header->magic != 'Z') {
         printf("Error: invalid magic header in the image. Corrupted file?\n");
@@ -212,8 +224,8 @@ int check_integrity(void)
     }
 
     if (image_size > options.size) {
-        printf("Error: invalid bitmap size. Header says the image is %d bytes but actual file size is %d\n",
-                image_size, options.size);
+        printf("Error: invalid bitmap size. Header says the image is %d bytes (%d bytes/page) but actual file size is %d\n",
+                image_size, getPageSize(header), options.size);
         return 1;
     }
 
@@ -275,7 +287,7 @@ static int zealfs_getattr(const char *path, struct stat *stbuf, struct fuse_file
     /* Not '/' */
     ZealFSHeader* header = (ZealFSHeader*) g_image;
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, NULL);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, NULL);
     ZealFileEntry* entry = (ZealFileEntry*) index;
     if (index > 0) {
         stat_from_entry(entry, stbuf);
@@ -296,7 +308,7 @@ static int zealfs_open(const char *path, struct fuse_file_info *info)
         return -EISDIR;
     }
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, NULL);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, NULL);
     ZealFileEntry* entry = (ZealFileEntry*) index;
     if (entry) {
         if (entry->flags & 1) {
@@ -315,7 +327,7 @@ static int zealfs_unlink(const char* path)
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, NULL);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, NULL);
     ZealFileEntry* entry = (ZealFileEntry*) index;
     if (index == 0) {
         return -ENOENT;
@@ -324,10 +336,12 @@ static int zealfs_unlink(const char* path)
         return -EISDIR;
     }
 
-    uint8_t page = entry->start_page;
+    uint16_t page = entry->start_page;
     while (page != 0) {
         freePage(header, page);
-        page = g_image[page << 8];
+        const uint16_t next = getNextFromFat(g_image, page);
+        setNextInFat(g_image, page, 0);
+        page = next;
     }
     /* Clear the flags of the file entry */
     entry->flags = 0;
@@ -344,8 +358,8 @@ static int zealfs_rename(const char* from, const char* to, unsigned int flags)
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     ZealFileEntry* free_entry = NULL;
-    ZealFileEntry* fentry = (ZealFileEntry*) browse_path(from + 1, header->entries, 1, NULL);
-    ZealFileEntry* tentry = (ZealFileEntry*) browse_path(to + 1, header->entries, 1, &free_entry);
+    ZealFileEntry* fentry = (ZealFileEntry*) browse_path(from + 1, getRootDirEntries(header), 1, NULL);
+    ZealFileEntry* tentry = (ZealFileEntry*) browse_path(to + 1,   getRootDirEntries(header), 1, &free_entry);
 
     if (fentry == 0 || (tentry == 0 && flags == RENAME_EXCHANGE)) {
         return -ENOENT;
@@ -416,7 +430,7 @@ static int zealfs_rmdir(const char* path)
         return -EACCES;
     }
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, NULL);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, NULL);
     ZealFileEntry* entry = (ZealFileEntry*) index;
     if (index == 0) {
         return -ENOENT;
@@ -426,10 +440,11 @@ static int zealfs_rmdir(const char* path)
     }
 
     /* Check that the directory is empty */
-    uint8_t page = entry->start_page;
-    ZealFileEntry* entries = (ZealFileEntry*) CONTENT_FROM_PAGE(page);
+    uint16_t page = entry->start_page;
+    ZealFileEntry* entries = (ZealFileEntry*) CONTENT_FROM_PAGE(header, page);
 
-    for (int i = 0; i < DIR_MAX_ENTRIES; i++) {
+    const int max_entries = getDirMaxEntries(header);
+    for (int i = 0; i < max_entries; i++) {
         if (entries[i].flags & IS_OCCUPIED) {
             return -ENOTEMPTY;
         }
@@ -456,7 +471,7 @@ static int zealfs_create_both(int isdir, const char * path, mode_t mode, struct 
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     ZealFileEntry* empty = NULL;
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, &empty);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, &empty);
     if (index) {
         return -EEXIST;
     }
@@ -478,7 +493,12 @@ static int zealfs_create_both(int isdir, const char * path, mode_t mode, struct 
     }
 
     /* Populate the entry */
+    unsigned int offset = (void*) empty - (void*) g_image;
     uint8_t newp = allocatePage((ZealFSHeader*) g_image);
+    printf("%s: allocating %s at page 0x%x (%d)."
+           "Entry offset in disk: %x (%d)\n",
+            path, isdir ? "dir": "file", newp, newp,
+            offset, offset);
     if (newp == 0) {
         free(path_mod);
         return -EFBIG;
@@ -503,7 +523,8 @@ static int zealfs_create_both(int isdir, const char * path, mode_t mode, struct 
     empty->seconds = toBCD(timest->tm_sec);
 
     /* Empty the page */
-    uint8_t* content = CONTENT_FROM_PAGE(newp);
+    uint8_t* content = CONTENT_FROM_PAGE(header, newp);
+    printf("\tPage offset for the dir: 0x%lx (%ld)\n", content - g_image, content - g_image);
     memset(content, 0, 256);
 
     free(path_mod);
@@ -547,25 +568,31 @@ static int zealfs_mkdir(const char * path, mode_t mode)
 static int zealfs_read(const char *path, char *buf, size_t size, off_t offset,
               struct fuse_file_info *fi)
 {
+    ZealFSHeader* header = (ZealFSHeader*) g_image;
     ZealFileEntry* entry = (ZealFileEntry*) fi->fh;
-    int jump_pages = offset / 255;
-    int offset_in_page = offset % 255;
+    /* Subtract 2 for the pointer to the next page */
+    const int data_bytes_per_page = getPageSize(header);
+    int jump_pages = offset / data_bytes_per_page;
+    int offset_in_page = offset % data_bytes_per_page;
 
     size = MIN(size, entry->size);
     const int total = size;
 
-    uint8_t* page = CONTENT_FROM_PAGE(entry->start_page);
+    uint16_t current_page = entry->start_page;
     while (jump_pages) {
-        page = CONTENT_FROM_PAGE(*page);
+        current_page = getNextFromFat(g_image, current_page);
         jump_pages--;
     }
 
+    uint8_t* page = CONTENT_FROM_PAGE(header, current_page);
+
     while (size) {
-        int count = MIN(255 - offset_in_page, size);
-        memcpy(buf, page + 1 + offset_in_page, count);
+        int count = MIN(data_bytes_per_page - offset_in_page, size);
+        memcpy(buf, page + offset_in_page, count);
         buf += count;
         if (size != count) {
-            page = CONTENT_FROM_PAGE(*page);
+            current_page = getNextFromFat(g_image, current_page);
+            page = CONTENT_FROM_PAGE(header, current_page);
         }
         size -= count;
         offset_in_page = 0;
@@ -591,41 +618,51 @@ static int zealfs_write(const char *path, const char *buf, size_t size, off_t of
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     ZealFileEntry* entry = (ZealFileEntry*) fi->fh;
-    int jump_pages = offset / 255;
-    int offset_in_page = offset % 255;
-    const int remaining_in_page = 255 - offset_in_page;
+    /* Subtract 2 for the pointer to the next page */
+    const int data_bytes_per_page = getPageSize(header);
+    int jump_pages = offset / data_bytes_per_page;
+    int offset_in_page = offset % data_bytes_per_page;
+    const int remaining_in_page = data_bytes_per_page - offset_in_page;
 
     const int total = size;
 
     /* Check if we have enough pages. */
-    if (header->free_pages * 255 + remaining_in_page < size) {
+    if (header->free_pages * data_bytes_per_page + remaining_in_page < size) {
         return -EFBIG;
     }
 
-    uint8_t* page = CONTENT_FROM_PAGE(entry->start_page);
+    uint8_t* page = CONTENT_FROM_PAGE(header, entry->start_page);
     while (jump_pages) {
-        page = CONTENT_FROM_PAGE(*page);
+        page = CONTENT_FROM_PAGE(header, *page);
         jump_pages--;
     }
 
+    uint16_t current_page = entry->start_page;
+
     while (size) {
-        int count = MIN(255 - offset_in_page, size);
+        int count = MIN(data_bytes_per_page - offset_in_page, size);
         // printf("Writing: %d, remaining %ld\n", count, size);
-        memcpy(page + 1 + offset_in_page, buf, count);
+        memcpy(page + offset_in_page, buf, count);
         entry->size += (uint16_t) count;
         buf += count;
         size -= count;
 
         /* In all cases, check the next page */
-        uint8_t next = *page;
+        uint16_t next = getNextFromFat(g_image, current_page);
         if (next) {
-            page = CONTENT_FROM_PAGE(*page);
+            current_page = next;
         } else if (size) {
             /* Only allocate a new page if we still need to write some bytes */
             next = allocatePage((ZealFSHeader*) g_image);
             assert( next != 0 );
-            *page = next;
-            page = CONTENT_FROM_PAGE(next);
+
+            /* Link the newly allocated page to the current page */
+            setNextInFat(g_image, current_page, next);
+
+            /* Make it the current page */
+            current_page = next;
+
+            page = CONTENT_FROM_PAGE(header, current_page);
         }
 
         offset_in_page = 0;
@@ -648,14 +685,14 @@ static int zealfs_opendir(const char * path, struct fuse_file_info * info)
     ZealFSHeader* header = (ZealFSHeader*) g_image;
 
     if (strcmp(path, "/") == 0) {
-        return fill_info(info, (uint64_t) &header->entries);
+        return fill_info(info, (uint64_t) getRootDirEntries(header));
     }
 
-    uint64_t index = browse_path(path + 1, header->entries, 1, NULL);
+    uint64_t index = browse_path(path + 1, getRootDirEntries(header), 1, NULL);
     ZealFileEntry* entry = (ZealFileEntry*) index;
     if (entry) {
         if (entry->flags & 1) {
-            return fill_info(info, (uint64_t) CONTENT_FROM_PAGE(entry->start_page));
+            return fill_info(info, (uint64_t) CONTENT_FROM_PAGE(header, entry->start_page));
         }
         return -ENOTDIR;
     }
@@ -688,7 +725,9 @@ static int zealfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
     ZealFileEntry* entries = (ZealFileEntry*) info->fh;
     /* If the directory we are browsing is the root directory, we have less entries */
-    const int max_entries = (entries == header->entries) ? ROOT_MAX_ENTRIES : DIR_MAX_ENTRIES;
+    const int max_entries = (entries == getRootDirEntries(header)) ?
+                                getRootDirMaxEntries(header) :
+                                getDirMaxEntries(header);
 
     /* Browse each entry, looking for an non-empty one thanks to the flags */
     for (int i = 0; i < max_entries; i++) {
@@ -734,8 +773,6 @@ static void show_help(const char *program)
 
 /**
  * @brief FUSE operations associated to our file system.
- *
- * TODO: Implement truncate function.
  */
 static const struct fuse_operations zealfs_oper = {
     .init     = zealfs_init,
@@ -778,13 +815,6 @@ int main(int argc, char *argv[])
     }
 
     printf("Info: using disk image %s\n", options.imagefile);
-    /* Convert the size to bytes and check that it's valid */
-    if (options.size > 64) {
-        printf("Invalid size %d\n"
-               "Provided size must be less or equal to 64KB\n",
-               options.size);
-        return 1;
-    }
     options.size *= 1024;
 
     /* Check if the file is already existing */

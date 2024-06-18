@@ -103,7 +103,7 @@ umount my_mount_dir
 
 **Unmounting is very important, as it will flush all the data written to the virtual disk into the actual image file!**
 
-## Implementation details
+## Implementation details (v1.0)
 
 ### Pages
 
@@ -213,6 +213,48 @@ To calculate the amount of page a file requires, we need to calculate: `(file_si
 Let's imagine this file is named `alphabet.txt` contains the pattern "ABC...XYZABC...XYZ...", its structure would look like this:
 
 ![File System Page Content](img/filecontent.jpg)
+
+## Implementation details (v2.0)
+
+For disks of size 64KB and lower, the page size is unchanged: 256 bytes.
+
+For bigger storages, the page size are determined by the following formula:
+
+$$ \frac{Size_{disk}}{Size_{page}} = Count_{page} $$
+$$ 2 * Size_{page} \geq Count_{page} $$
+
+If we develop:
+
+$$ Size_{page} \geq \frac{Size_{disk}}{2 *Size_{page}} $$
+$$ {Size_{page}}^2 \geq \frac{Size_{disk}}{2} $$
+$$ Size_{page} \geq \sqrt{\frac{Size_{disk}}{2}} $$
+
+Which gives:
+$$ Size_{disk} \leq 128KB => Size_{page} = 256 $$
+$$ Size_{disk} \leq 512KB => Size_{page} = 512 $$
+$$ Size_{disk} \leq 2MB => Size_{page} = 1KB $$
+$$ Size_{disk} \leq 8MB => Size_{page} = 2KB $$
+$$ Size_{disk} \leq 32MB => Size_{page} = 4KB $$
+$$ Size_{disk} \leq 128MB => Size_{page} = 8KB $$
+$$ Size_{disk} \leq 512MB => Size_{page} = 16KB $$
+$$ Size_{disk} \leq 2GB => Size_{page} = 32KB $$
+$$ Size_{disk} \leq 4GB => Size_{page} = 64KB $$
+
+
+The reason is that the FAT will be stored inside two pages, page 1 and page 2. (page 0 being the header)
+
+Another possible implementation is to keep the linked list of pages. The bitmap is in the header, which is the first page. The root directory follows the bitmap. Page size is calculated as follows:
+
+$$ Size_{page} = \frac{Size_{disk}}{2^{16}} $$
+$$ Size_{disk} \leq 16MB => Size_{page} = 256B $$
+$$ Size_{disk} \leq 32MB => Size_{page} = 512B $$
+$$ Size_{disk} \leq 64MB => Size_{page} = 1KB $$
+$$ Size_{disk} \leq 128MB => Size_{page} = 2KB $$
+$$ Size_{disk} \leq 256MB => Size_{page} = 4KB $$
+$$ Size_{disk} \leq 512MB => Size_{page} = 8KB $$
+$$ Size_{disk} \leq 1GB => Size_{page} = 16KB $$
+$$ Size_{disk} \leq 2GB => Size_{page} = 32KB $$
+$$ Size_{disk} \leq 4GB => Size_{page} = 64KB $$
 
 ## License
 

@@ -16,8 +16,15 @@
 #endif
 
 #ifndef DEFAULT_IMAGE_SIZE_KB
-#define DEFAULT_IMAGE_SIZE_KB 32
+#define DEFAULT_IMAGE_SIZE_KB 512
 #endif
+
+
+#define BIT(X)  (1ULL << (X))
+#define KB(X)   (X)*1024ULL
+#define MB(X)   KB(X)*1024ULL
+#define GB(X)   MB(X)*1024ULL
+
 
 #ifndef MIN
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
@@ -43,9 +50,9 @@ typedef struct {
      * Bit 7: 1 = occupied, 0 = free */
     uint8_t flags; /* IS_DIR, IS_FILE, etc... */
     char name[NAME_MAX_LEN];
-    uint8_t start_page;
+    uint16_t start_page;
     /* Size of the file in bytes, little-endian! */
-    uint16_t size;
+    uint32_t size;
     /* Zeal 8-bit OS date format (BCD) */
     uint8_t  year[2];
     uint8_t  month;
@@ -55,49 +62,90 @@ typedef struct {
     uint8_t  minutes;
     uint8_t  seconds;
     /* Reserved for future use */
-    uint8_t reserved[4];
+    uint8_t reserved;
 } __attribute__((packed)) ZealFileEntry;
 
 _Static_assert(sizeof(ZealFileEntry) == 32, "ZealFileEntry must be smaller than 32 bytes");
 
-#define BITMAP_SIZE     32
 #define RESERVED_SIZE   28
 
 /* Type for partition header */
 typedef struct {
   uint8_t magic;    /* Must be 'Z' ascii code */
   uint8_t version;  /* Version of the file system */
-  /* Number of bytes composing the bitmap.
-   * No matter how big the disk actually is, the bitmap is always
-   * BITMAP_SIZE bytes big, thus we need field to mark the actual
-   * number of bytes we will be using. */
-  uint8_t bitmap_size;
-  /* Number of free pages */
-  uint8_t free_pages;
+  /* Number of bytes composing the bitmap */
+  uint16_t bitmap_size;
+  /* Number of free pages, we always have at most 65535 pages */
+  uint16_t free_pages;
+  /* Size of the pages:
+   * 0 - 256
+   * 1 - 512
+   * 2 - 1024
+   * 3 - 2048
+   * 4 - 4096
+   * 5 - 8192
+   * 6 - 16384
+   * 7 - 32768
+   * 8 - 65536
+   */
+  uint8_t page_size;
   /* Bitmap for the free pages. A used page is marked as 1, else 0 */
-  uint8_t pages_bitmap[BITMAP_SIZE];   /* 256 pages/8-bit = 32 */
-  /* Reserved bytes, to align the entries and for future use, such as
-   * extended root directory, volume name, extra bitmap, etc... */
-  uint8_t reserved[RESERVED_SIZE];
-  /* Root directory, must be at an offset multiple of sizeof(ZealFileEntry) */
-  ZealFileEntry entries[];
+  uint8_t pages_bitmap[];   /* 256 pages/8-bit = 32 */
 } __attribute__((packed)) ZealFSHeader;
 
-_Static_assert(offsetof(ZealFSHeader, entries) % sizeof(ZealFileEntry) == 0,
-               "Root directory entries must be aligned on 32");
+
+#define ALIGN_UP(size,bound) (((size) + (bound) - 1) & ~((bound) - 1))
+
+/**
+ * @brief Get the size of the FileSystem header, multiple of 32 (sizeof(ZealFileEntry))
+ */
+static inline int getFSHeaderSize(const ZealFSHeader* header)
+{
+    int size = sizeof(ZealFSHeader) + header->bitmap_size;
+    /* Round the size up to the next sizeof(ZealFileEntry) bytes bound (FileEntry) */
+    size = ALIGN_UP(size, sizeof(ZealFileEntry));
+    return size;
+}
+
+
+/**
+ * @brief Get the size, in bytes, of the pages on the current disk
+ */
+static inline int getPageSize(const ZealFSHeader* header)
+{
+    const int size = header->page_size;
+    assert (size <= 8);
+    return 256 << size;
+}
+
+
+/**
+ * Helper to get a pointer to the root directory entries
+ */
+static inline ZealFileEntry* getRootDirEntries(ZealFSHeader* header) {
+    return ((void*) header) + getFSHeaderSize(header);
+}
+
 
 /*
  * As the root directory has less available space for the entries, it will have less than
  * regular directories. Define the following macro to simply the calculation.
  */
-#define ROOT_MAX_ENTRIES ((256 - sizeof(ZealFSHeader)) / sizeof(ZealFileEntry))
-
-/* Entries count for regular directories (i.e. not root) */
-#define DIR_MAX_ENTRIES (256 / sizeof(ZealFileEntry))
+static inline uint16_t getRootDirMaxEntries(ZealFSHeader* header) {
+    /* The size of the header depends on the size of the bitmap */
+    return (getPageSize(header) - getFSHeaderSize(header)) / sizeof(ZealFileEntry);
+}
 
 
 /**
- * Help that converting an 8-bit BCD value into a binary value.
+ * Get the maximum number of files in other directories than the root one
+ */
+static inline uint16_t getDirMaxEntries(ZealFSHeader* header) {
+    return getPageSize(header) / sizeof(ZealFileEntry);
+}
+
+/**
+ * Helper that converts an 8-bit BCD value into a binary value.
  */
 static inline int fromBCD(uint8_t value) {
     return (value >> 4) * 10 + (value & 0xf);
@@ -118,10 +166,36 @@ static inline uint8_t toBCD(int value) {
  * @param page Page number to free, must not be 0.
  *
  */
-static inline void freePage(ZealFSHeader* header, uint8_t page) {
+static inline void freePage(ZealFSHeader* header, uint16_t page) {
     assert(page != 0);
-    header->pages_bitmap[page / 8] &= ~(1 << page % 8);
+    header->pages_bitmap[page / 8] &= ~(1 << (page % 8));
     header->free_pages++;
+}
+
+
+/**
+ * @brief Get the next page of the current from the FAT
+ */
+static uint16_t getNextFromFat(uint8_t* img, uint16_t current_page)
+{
+    const ZealFSHeader* header = (ZealFSHeader*) img;
+    const int page_size = getPageSize(header);
+    /* The FAT starts at page 1 */
+    uint16_t* fat = (uint16_t*) (img + page_size);
+    return fat[current_page];
+}
+
+
+/**
+ * @brief Get the next page of the current from the FAT
+ */
+static void setNextInFat(uint8_t* img, uint16_t current_page, uint16_t next_page)
+{
+    const ZealFSHeader* header = (ZealFSHeader*) img;
+    const int page_size = getPageSize(header);
+    /* The FAT starts at page 1 */
+    uint16_t* fat = (uint16_t*) (img + page_size);
+    fat[current_page] = next_page;
 }
 
 
@@ -133,28 +207,84 @@ static inline void freePage(ZealFSHeader* header, uint8_t page) {
  * @return Page number on success, 0 on error.
  */
 static uint8_t allocatePage(ZealFSHeader* header) {
-  const int size = header->bitmap_size;
-  int i = 0;
-  uint8_t value = 0;
-  for (i = 0; i < size; i++) {
-    value = header->pages_bitmap[i];
-    if (value != 0xff) {
-      break;
+    const int size = header->bitmap_size;
+    int i = 0;
+    uint8_t value = 0;
+    for (i = 0; i < size; i++) {
+        value = header->pages_bitmap[i];
+        if (value != 0xff) {
+            break;
+        }
     }
-  }
-  /* If we've reached the size, the bitmap is full */
-  if (i == size) {
-    return 0;
-  }
-  /* Else, return the index */
-  int index_0 = 0;
-  while ((value & 1) != 0) {
-    value >>= 1;
-    index_0++;
-  }
+    /* If we've reached the size, the bitmap is full */
+    if (i == size) {
+        return 0;
+    }
+    /* Else, return the index */
+    int index_0 = 0;
+    while ((value & 1) != 0) {
+        value >>= 1;
+        index_0++;
+    }
 
-  /* Set the page as allocated in the bitmap */
-  header->pages_bitmap[i] |= 1 << index_0;
-  header->free_pages--;
-  return i * 8 + index_0;
+    /* Set the page as allocated in the bitmap */
+    header->pages_bitmap[i] |= 1 << index_0;
+    header->free_pages--;
+
+    return i * 8 + index_0;
+}
+
+
+/**
+ * @brief Get the next power of two of the given number
+ */
+static inline uint64_t upperPowerOfTwo(long long disk_size)
+{
+    assert(disk_size != 0);
+    int highest_one = 0;
+    /* Number of ones in the integer*/
+    int ones = 0;
+
+    for (int i = 32; i >= 0; i--) {
+        if (disk_size & BIT(i)) {
+            if (highest_one == 0) highest_one = i;
+            else ones++;
+        }
+    }
+
+    if (ones == 0) {
+        return disk_size;
+    }
+
+    /* If we got more than a single 1 bit, we have to return the next power
+     * of two, so return BIT(highest_one+1) */
+    return BIT(highest_one+1);
+}
+
+/**
+ * @brief Helper to get the recommended page size from a disk size.
+ *
+ */
+static inline int pageSizeFromDiskSize(long long disk_size)
+{
+    if (disk_size <= KB(128)) {
+        return 256;
+    } else if (disk_size <= KB(512)) {
+        return 512;
+    } else if (disk_size <= MB(2)) {
+        return KB(1);
+    } else if (disk_size <= MB(8)) {
+        return KB(2);
+    } else if (disk_size <= MB(32)) {
+        return KB(4);
+    } else if (disk_size <= MB(128)) {
+        return KB(8);
+    } else if (disk_size <= MB(512)) {
+        return KB(16);
+    } else if (disk_size <= GB(2)) {
+        return KB(32);
+    }
+
+    return KB(64);
+//    return upperPowerOfTwo(disk_size) / 65536;
 }
