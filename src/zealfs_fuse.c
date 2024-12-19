@@ -4,7 +4,6 @@
  */
 
 #define FUSE_USE_VERSION 31
-#define _GNU_SOURCE
 
 #include <libgen.h>
 #include <fuse3/fuse.h>
@@ -21,6 +20,8 @@
 #include <stdint.h>
 #include <time.h>
 #include <dirent.h>
+/* For RENAME_* macros  */
+#include <linux/fs.h>
 #include "zealfs.h"
 
 /* File descriptor for the opened image */
