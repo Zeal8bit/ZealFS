@@ -24,6 +24,8 @@
 #include <linux/fs.h>
 #include "zealfs.h"
 
+#define TARGET_TYPE 0x5A    // 'Z'
+
 /* File descriptor for the opened image */
 static int g_fimg;
 
@@ -41,6 +43,7 @@ static struct options {
     const char *imagefile;
     int size;
     int show_help;
+    off_t offset;
 } options;
 
 #define OPTION(t, p)                           \
@@ -174,7 +177,7 @@ static int format(int file) {
 
     /* Initialize image header */
     ZealFSHeader* header = (ZealFSHeader*) g_image;
-    header->magic = 'Z';
+    header->magic = TARGET_TYPE;
     /* Version 2 supports extended mode */
     header->version = 2;
     /* According to the size of the disk, we have to calculate the size of the pages */
@@ -752,7 +755,7 @@ static int zealfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static void zealfs_destroy(void *private_data)
 {
     /* Flush cached data to file */
-    lseek(g_fimg, 0, SEEK_SET);
+    lseek(g_fimg, options.offset, SEEK_SET);
     write(g_fimg, g_image, options.size);
     close(g_fimg);
 }
@@ -791,6 +794,68 @@ static const struct fuse_operations zealfs_oper = {
 };
 
 
+/**
+ * @brief Look for a ZealFS partition in the image file. If it has an MBR, it will check the 4 partitions inside,
+ * If it's a raw image, it will return sector 0 and the image size.
+ */
+#define MBR_SIZE                512
+#define PARTITION_ENTRY_SIZE    16
+#define PARTITION_TABLE_OFFSET  446
+#define PARTITION_TYPE_OFFSET   4
+#define LBA_OFFSET              8
+#define SECTOR_COUNT_OFFSET     12
+#define SECTOR_SIZE             512
+
+int mbr_find_partition(const char* filename, int filesize, off_t *offset, int* size)
+{
+    uint8_t mbr[MBR_SIZE];
+
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        perror("Could not open file");
+        return 0;
+    }
+
+    ssize_t bytes_read = read(fd, mbr, MBR_SIZE);
+    if (bytes_read != MBR_SIZE) {
+        perror("Failed to read MBR");
+        close(fd);
+        return 0;
+    }
+
+    /* Check for MBR signature (0x55AA at offset 510) */
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
+        /* "Invalid MBR signature, check if it's a raw ZealFS image */
+        close(fd);
+        if (mbr[0] == TARGET_TYPE) {
+            *offset = 0;
+            *size = filesize;
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Iterate through the 4 partition entries */
+    for (int i = 0; i < 4; i++) {
+        uint8_t *entry = mbr + PARTITION_TABLE_OFFSET + i * PARTITION_ENTRY_SIZE;
+        uint8_t type = entry[PARTITION_TYPE_OFFSET];
+
+        if (type == TARGET_TYPE) {
+            const uint32_t lba = *(uint32_t *)(entry + LBA_OFFSET);
+            const uint32_t sector_count = *(uint32_t *)(entry + SECTOR_COUNT_OFFSET);
+            *offset = (off_t)lba * SECTOR_SIZE;
+            printf("Sector count: %d, sector size: %d\n", sector_count, SECTOR_SIZE);
+            *size = sector_count * SECTOR_SIZE;
+            close(fd);
+            return 1;
+        }
+    }
+    close(fd);
+    return 0;
+}
+
+
+
 int main(int argc, char *argv[])
 {
     int ret;
@@ -823,8 +888,11 @@ int main(int argc, char *argv[])
     if (stat(options.imagefile, &st) != 0) {
         /* File doesn't exist, we need to truncate the new file */
         trunc = 1;
+    } else if (mbr_find_partition(options.imagefile, st.st_size, &options.offset, &options.size)) {
+        printf("Found ZealFS partition at offset 0x%lx, size %d bytes\n", options.offset, options.size);
     } else {
-        options.size = st.st_size;
+        printf("Could not find any ZealFS partition in the existing image\n");
+        return 1;
     }
 
     /* Create a cache for the file */
@@ -843,6 +911,8 @@ int main(int argc, char *argv[])
     }
 
     if (!trunc) {
+        /* Seek to the ZealFS partition */
+        assert(lseek(g_fimg, options.offset, SEEK_SET) == options.offset);
         int rd = read(g_fimg, g_image, options.size);
         assert(rd == options.size);
     }

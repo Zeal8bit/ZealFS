@@ -267,24 +267,23 @@ static inline uint64_t upperPowerOfTwo(long long disk_size)
  */
 static inline int pageSizeFromDiskSize(long long disk_size)
 {
-    if (disk_size <= KB(128)) {
+    if (disk_size <= KB(64)) {
         return 256;
-    } else if (disk_size <= KB(512)) {
+    } else if (disk_size <= KB(256)) {
         return 512;
-    } else if (disk_size <= MB(2)) {
+    } else if (disk_size <= MB(1)) {
         return KB(1);
-    } else if (disk_size <= MB(8)) {
+    } else if (disk_size <= MB(4)) {
         return KB(2);
-    } else if (disk_size <= MB(32)) {
+    } else if (disk_size <= MB(16)) {
         return KB(4);
-    } else if (disk_size <= MB(128)) {
+    } else if (disk_size <= MB(64)) {
         return KB(8);
-    } else if (disk_size <= MB(512)) {
+    } else if (disk_size <= MB(256)) {
         return KB(16);
-    } else if (disk_size <= GB(2)) {
+    } else if (disk_size <= GB(1)) {
         return KB(32);
     }
 
     return KB(64);
-//    return upperPowerOfTwo(disk_size) / 65536;
 }
