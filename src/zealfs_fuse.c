@@ -657,7 +657,9 @@ static int zealfs_write(const char *path, const char *buf, size_t size, off_t of
         } else if (size) {
             /* Only allocate a new page if we still need to write some bytes */
             next = allocatePage((ZealFSHeader*) g_image);
-            assert( next != 0 );
+            if (next == 0) {
+                return -ENOSPC;
+            }
 
             /* Link the newly allocated page to the current page */
             setNextInFat(g_image, current_page, next);

@@ -206,7 +206,7 @@ static void setNextInFat(uint8_t* img, uint16_t current_page, uint16_t next_page
  *
  * @return Page number on success, 0 on error.
  */
-static uint8_t allocatePage(ZealFSHeader* header) {
+static uint16_t allocatePage(ZealFSHeader* header) {
     const int size = header->bitmap_size;
     int i = 0;
     uint8_t value = 0;
@@ -218,6 +218,7 @@ static uint8_t allocatePage(ZealFSHeader* header) {
     }
     /* If we've reached the size, the bitmap is full */
     if (i == size) {
+        printf("No more space in the bitmap of size: %d\n", header->bitmap_size);
         return 0;
     }
     /* Else, return the index */
