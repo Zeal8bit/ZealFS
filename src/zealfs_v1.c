@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2022 Zeal 8-bit Computer <contact@zeal8bit.com>
+/* SPDX-FileCopyrightText: 2022-2025 Zeal 8-bit Computer <contact@zeal8bit.com>
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -22,36 +22,19 @@
 #include <dirent.h>
 /* For RENAME_* macros  */
 #include <linux/fs.h>
-#include "zealfs.h"
+#include "common.h"
+#include "zealfs_v1.h"
 
-/* File descriptor for the opened image */
-static int g_fimg;
 
 /* Cache for the image, as the disk image is at most 64KB, we can allocate it from
  * the heap without a problem. */
 static uint8_t *g_image;
 
+
 /**
  * Macro to help converting a page number into an address in the cache.
  */
 #define CONTENT_FROM_PAGE(page) ( g_image + (((int) page) << 8) )
-
-/* Options used with FUSE to parse the parameters given from the command line. */
-static struct options {
-    const char *imagefile;
-    int size;
-    int show_help;
-} options;
-
-#define OPTION(t, p)                           \
-    { t, offsetof(struct options, p), 1 }
-static const struct fuse_opt option_spec[] = {
-    OPTION("--image=%s", imagefile),
-    OPTION("--size=%d", size),
-    OPTION("-h", show_help),
-    OPTION("--help", show_help),
-    FUSE_OPT_END
-};
 
 
 /**
@@ -166,7 +149,10 @@ static int fill_info(struct fuse_file_info * info, uint64_t addr)
  * @return 0 on success, error else
  */
 static int format(int file) {
-    int err = ftruncate(g_fimg, options.size);
+    const int img_fd = common_img_fd();
+    const int img_size = common_img_size();
+
+    int err = ftruncate(img_fd, img_size);
     if (err) {
         return err;
     }
@@ -176,16 +162,16 @@ static int format(int file) {
     header->magic = 'Z';
     header->version = 1;
     /* Do not count the first page */
-    header->bitmap_size = options.size / 256 / 8;
+    header->bitmap_size = img_size / 256 / 8;
     /* Do not count the first page */
-    header->free_pages = options.size / 256 - 1;
+    header->free_pages = img_size / 256 - 1;
     /* All the pages are free (0), mark the first one as occupied */
     header->pages_bitmap[0] = 1;
     memset(header->reserved, 0, sizeof(header->reserved));
 
     /* Flush the cache to the file. */
-    lseek(g_fimg, 0, SEEK_SET);
-    write(g_fimg, g_image, options.size);
+    lseek(img_fd, 0, SEEK_SET);
+    write(img_fd, g_image, img_size);
 
     return 0;
 }
@@ -195,11 +181,12 @@ static int format(int file) {
  *
  * @return 0 on success, 1 on error
  */
-int check_integrity(void)
+int check_integrity()
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     /* Size of the file according to the bitmap */
     const int image_size = header->bitmap_size * 8 * 256;
+    const int requested_size = common_img_size();
 
     if (header->magic != 'Z') {
         printf("Error: invalid magic header in the image. Corrupted file?\n");
@@ -211,13 +198,13 @@ int check_integrity(void)
         return 1;
     }
 
-    if (image_size > options.size) {
+    if (image_size > requested_size) {
         printf("Error: invalid bitmap size. Header says the image is %d bytes but actual file size is %d\n",
-                image_size, options.size);
+                image_size, requested_size);
         return 1;
     }
 
-    if (image_size < options.size) {
+    if (image_size < requested_size) {
         printf("Warning: image size according to the bitmap is smaller than file size, "
                "some part of the image will be unreachable.\n");
     }
@@ -713,22 +700,69 @@ static int zealfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static void zealfs_destroy(void *private_data)
 {
     /* Flush cached data to file */
-    lseek(g_fimg, 0, SEEK_SET);
-    write(g_fimg, g_image, options.size);
-    close(g_fimg);
+    int fd = common_img_fd();
+    lseek(fd, 0, SEEK_SET);
+    write(fd, g_image, common_img_size());
+    close(fd);
 }
 
 
 /**
- * @brief Show the help with the possible options
+ * @brief Image init, first function called, right after parsing the command line options
  */
-static void show_help(const char *program)
+static int zealfs_image_init(zealfs_context* ctx)
 {
-    printf("usage: %s [options] <mountpoint>\n\n", program);
-    printf("File-system specific options:\n"
-           "    --image=<s>          Name of the image file, \"" DEFAULT_IMAGE_NAME "\" by default\n"
-           "    --size=<s>           Size of the new image file in KB (if not existing)\n"
-           "\n");
+    /* Convert the size to bytes and check that it's valid */
+    if (ctx->size > 64) {
+        printf("Invalid size %d\n"
+               "Provided size must be less or equal to 64KB\n",
+               ctx->size);
+        return 1;
+    }
+    ctx->size *= 1024;
+
+    /* Check if the file already exists */
+    struct stat st = { 0 };
+    int trunc = 0;
+    if (stat(ctx->img_file, &st) != 0) {
+        /* File doesn't exist, we need to truncate the new file */
+        trunc = 1;
+    } else {
+        ctx->size = st.st_size;
+    }
+
+    /* Create a cache for the file */
+    g_image = calloc(1, ctx->size);
+    if (g_image == NULL) {
+        printf("Could not allocate enough memory!\n");
+        return 1;
+    }
+
+    ctx->img_fd = open(ctx->img_file, O_RDWR | O_CREAT, 0644);
+    if (ctx->img_fd < 0) {
+        perror("Could not open image file");
+        return 2;
+    }
+
+    if (trunc && format(ctx->img_fd)) {
+        perror("Could not set new file size");
+        return 3;
+    }
+
+    if (!trunc) {
+        int rd = read(ctx->img_fd, g_image, ctx->size);
+        if (rd != ctx->size) {
+            printf("Could not read the image file!\n");
+            return 1;
+        }
+    }
+
+    /* Check the integrity of the image */
+    if (check_integrity()) {
+        return 4;
+    }
+
+    return 0;
 }
 
 
@@ -737,92 +771,21 @@ static void show_help(const char *program)
  *
  * TODO: Implement truncate function.
  */
-static const struct fuse_operations zealfs_oper = {
-    .init     = zealfs_init,
-    .getattr  = zealfs_getattr,
-    .opendir  = zealfs_opendir,
-    .readdir  = zealfs_readdir,
-    .open     = zealfs_open,
-    .read     = zealfs_read,
-    .create   = zealfs_create,
-    .write    = zealfs_write,
-    .unlink   = zealfs_unlink,
-    .rename   = zealfs_rename,
-    .mkdir    = zealfs_mkdir,
-    .rmdir    = zealfs_rmdir,
-    .destroy  = zealfs_destroy,
+const zealfs_operations zealfs_v1_ops = {
+    .fuse_ops = {
+        .init     = zealfs_init,
+        .getattr  = zealfs_getattr,
+        .opendir  = zealfs_opendir,
+        .readdir  = zealfs_readdir,
+        .open     = zealfs_open,
+        .read     = zealfs_read,
+        .create   = zealfs_create,
+        .write    = zealfs_write,
+        .unlink   = zealfs_unlink,
+        .rename   = zealfs_rename,
+        .mkdir    = zealfs_mkdir,
+        .rmdir    = zealfs_rmdir,
+        .destroy  = zealfs_destroy,
+    },
+    .image_init = zealfs_image_init,
 };
-
-
-int main(int argc, char *argv[])
-{
-    int ret;
-    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-
-    options.imagefile = strdup(DEFAULT_IMAGE_NAME);
-    options.size = DEFAULT_IMAGE_SIZE_KB;
-
-    /* Parse options */
-    if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
-        return 1;
-
-    /* When --help is specified, first print our own file-system
-       specific help text, then signal fuse_main to show
-       additional help (by adding `--help` to the options again)
-       without usage: line (by setting argv[0] to the empty
-       string) */
-    if (options.show_help) {
-        show_help(argv[0]);
-        assert(fuse_opt_add_arg(&args, "--help") == 0);
-        args.argv[0][0] = '\0';
-    }
-
-    printf("Info: using disk image %s\n", options.imagefile);
-    /* Convert the size to bytes and check that it's valid */
-    if (options.size > 64) {
-        printf("Invalid size %d\n"
-               "Provided size must be less or equal to 64KB\n",
-               options.size);
-        return 1;
-    }
-    options.size *= 1024;
-
-    /* Check if the file is already existing */
-    struct stat st = { 0 };
-    int trunc = 0;
-    if (stat(options.imagefile, &st) != 0) {
-        /* File doesn't exist, we need to truncate the new file */
-        trunc = 1;
-    } else {
-        options.size = st.st_size;
-    }
-
-    /* Create a cache for the file */
-    g_image = calloc(1, options.size);
-    assert(g_image != NULL);
-
-    g_fimg = open(options.imagefile, O_RDWR | O_CREAT, 0644);
-    if (g_fimg < 0) {
-        perror("Could not open image file");
-        return 2;
-    }
-
-    if (trunc && format(g_fimg)) {
-        perror("Could not set new file size");
-        return 3;
-    }
-
-    if (!trunc) {
-        int rd = read(g_fimg, g_image, options.size);
-        assert(rd == options.size);
-    }
-
-    /* Check the integrity of the image */
-    if (check_integrity()) {
-        return 4;
-    }
-
-    ret = fuse_main(args.argc, args.argv, &zealfs_oper, NULL);
-    fuse_opt_free_args(&args);
-    return ret;
-}
