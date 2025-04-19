@@ -29,6 +29,7 @@
 
 /* Declare the FUSE structures for all the supported version of ZealFS */
 extern zealfs_operations zealfs_v1_ops;
+extern zealfs_operations zealfs_v2_ops;
 
 static zealfs_context options;
 
@@ -38,6 +39,8 @@ static zealfs_context options;
 static const struct fuse_opt option_spec[] = {
     OPTION("--image=%s", img_file),
     OPTION("--size=%d", size),
+    OPTION("-v1", v1),
+    OPTION("-v2", v2),
     OPTION("-h", show_help),
     OPTION("--help", show_help),
     FUSE_OPT_END
@@ -52,6 +55,8 @@ static void show_help(const char *program)
     printf("File-system specific options:\n"
             "    --image=<s>          Name of the image file, \"" DEFAULT_IMAGE_NAME "\" by default\n"
             "    --size=<s>           Size of the new image file in KB (if not existing)\n"
+            "    -v1                  Use ZealFSv1 (64KB limit) for the given image\n"
+            "    -v2                  Use ZealFSv2 (4GB limit) for the given image\n"
             "\n");
 }
 
@@ -64,6 +69,11 @@ int common_img_fd(void)
 int common_img_size(void)
 {
     return options.size;
+}
+
+off_t common_img_offset(void)
+{
+    return options.offset;
 }
 
 int main(int argc, char *argv[])
@@ -91,9 +101,25 @@ int main(int argc, char *argv[])
     }
 
     printf("Info: using disk image %s\n", options.img_file);
+    /* Size is given in KB */
+    options.size *= 1024;
 
-    /* Call the implementation init function, it returns 0 on success, non-zero value else */
-    ret = zealfs_v1_ops.image_init(&options);
+    /* Call the implementation init function, it returns 0 on success, non-zero value else.
+     * Make sure only one version was provided */
+    if (options.v1 && options.v2) {
+        printf("Invalid ZealFS version!\nPlease provide a single version\n");
+        show_help(argv[0]);
+        return 1;
+    } else if (options.v1) {
+        ret = zealfs_v1_ops.image_init(&options);
+    } else if (options.v2) {
+        ret = zealfs_v2_ops.image_init(&options);
+    } else {
+        printf("Please specify a ZealFS version\n");
+        show_help(argv[0]);
+        return 1;
+    }
+
     if (ret != 0) {
         return ret;
     }
