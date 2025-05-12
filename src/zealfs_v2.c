@@ -184,7 +184,12 @@ static int format(int file) {
 
     /* Flush the cache to the file. */
     lseek(img_fd, 0, SEEK_SET);
-    write(img_fd, g_image, img_size);
+    int wr = write(img_fd, g_image, img_size);
+    if (wr != img_size) {
+        perror("Header could not be written back");
+        return 1;
+    }
+
 
     return 0;
 }
@@ -745,7 +750,10 @@ static void zealfs_destroy(void *private_data)
     int fd = common_img_fd();
     int offset = common_img_offset();
     lseek(fd, offset, SEEK_SET);
-    write(fd, g_image, common_img_size());
+    int wr = write(fd, g_image, common_img_size());
+    if (wr != common_img_size()) {
+        printf("WARNING: Not all data have been written back\n");
+    }
     close(fd);
 }
 
@@ -800,7 +808,6 @@ int mbr_find_partition(const char* filename, int filesize, off_t *offset, int* s
             const uint32_t lba = *(uint32_t *)(entry + LBA_OFFSET);
             const uint32_t sector_count = *(uint32_t *)(entry + SECTOR_COUNT_OFFSET);
             *offset = (off_t)lba * SECTOR_SIZE;
-            printf("Sector count: %d, sector size: %d\n", sector_count, SECTOR_SIZE);
             *size = sector_count * SECTOR_SIZE;
             close(fd);
             return 1;
@@ -823,7 +830,8 @@ static int zealfs_image_init(zealfs_context* ctx)
         /* File doesn't exist, we need to truncate the new file */
         trunc = 1;
     } else if (mbr_find_partition(ctx->img_file, st.st_size, &ctx->offset, &ctx->size)) {
-        printf("Found ZealFS partition at offset 0x%lx, size %d bytes\n", ctx->offset, ctx->size);
+        printf("Found ZealFS partition at offset 0x%lx (LBA: 0x%lx), size %d bytes\n",
+            ctx->offset, ctx->offset / 512, ctx->size);
     } else {
         printf("Could not find any ZealFS partition in the existing image\n");
         return 1;
@@ -856,6 +864,7 @@ static int zealfs_image_init(zealfs_context* ctx)
 
     /* Check the integrity of the image */
     if (check_integrity()) {
+        printf("Image is corrupted!\n");
         return 4;
     }
 

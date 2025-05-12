@@ -106,25 +106,27 @@ int main(int argc, char *argv[])
 
     /* Call the implementation init function, it returns 0 on success, non-zero value else.
      * Make sure only one version was provided */
+    zealfs_operations* ops = NULL;
     if (options.v1 && options.v2) {
         printf("Invalid ZealFS version!\nPlease provide a single version\n");
         show_help(argv[0]);
         return 1;
     } else if (options.v1) {
-        ret = zealfs_v1_ops.image_init(&options);
+        ops = &zealfs_v1_ops;
     } else if (options.v2) {
-        ret = zealfs_v2_ops.image_init(&options);
+        ops = &zealfs_v2_ops;
     } else {
         printf("Please specify a ZealFS version\n");
         show_help(argv[0]);
         return 1;
     }
 
+    ret = ops->image_init(&options);
     if (ret != 0) {
         return ret;
     }
 
-    ret = fuse_main(args.argc, args.argv, &zealfs_v1_ops.fuse_ops, NULL);
+    ret = fuse_main(args.argc, args.argv, &ops->fuse_ops, NULL);
     fuse_opt_free_args(&args);
     return ret;
 }
