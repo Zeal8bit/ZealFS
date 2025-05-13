@@ -487,7 +487,7 @@ static int zealfs_create_both(int isdir, const char * path, mode_t mode, struct 
 
     /* Populate the entry */
     unsigned int offset = (void*) empty - (void*) g_image;
-    uint8_t newp = allocatePage((ZealFSHeader*) g_image);
+    uint16_t newp = allocatePage((ZealFSHeader*) g_image);
     printf("%s: allocating %s at page 0x%x (%d)."
            "Entry offset in disk: %x (%d)\n",
             path, isdir ? "dir": "file", newp, newp,
@@ -636,7 +636,7 @@ static int zealfs_write(const char *path, const char *buf, size_t size, off_t of
         int count = MIN(data_bytes_per_page - offset_in_page, size);
         // printf("Writing: %d, remaining %ld\n", count, size);
         memcpy(page + offset_in_page, buf, count);
-        entry->size += (uint16_t) count;
+        entry->size += count;
         buf += count;
         size -= count;
 
