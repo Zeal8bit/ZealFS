@@ -302,13 +302,13 @@ Unlike ZealFSv1, which did not use one, **ZealFSv2 introduces a FAT (File Alloca
 
 On **storages up to 64KB**, the FAT table contains up to 256 entries (1 byte per entry), allowing it to fit entirely within a single page. In this case:
 
-    * **Page 0**: Header and root directory
-    * **Page 1**: FAT table
+* **Page 0**: Header and root directory
+* **Page 1**: FAT table
 
 On **storages larger than 64KB**, each FAT entry is 2 bytes (16 bits), supporting up to 65,536 entries. In this case:
 
-    * **Page 0**: Header and root directory
-    * **Pages 1–2**: FAT table (fixed size of exactly two pages)
+* **Page 0**: Header and root directory
+* **Pages 1–2**: FAT table (fixed size of exactly two pages)
 
 > ⚠️ The FAT table **must always occupy exactly two pages**, regardless of storage size. This constraint simplifies the implementation and keeps metadata overhead low.
 
