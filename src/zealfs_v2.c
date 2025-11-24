@@ -251,9 +251,9 @@ static int check_integrity(void)
         return 1;
     }
 
-    if (image_size > requested_size) {
-        printf("Error: invalid bitmap size. Header says the image is %d bytes (%d bytes/page) but actual file size is %d\n",
-                image_size, getPageSize(header), requested_size);
+    if (image_size > requested_size + getPageSize(header)) {
+        printf("Error: invalid bitmap size. Header says the image is %d bytes (%d bytes/page) but actual file size is %d (diff: %d)\n",
+                image_size, getPageSize(header), requested_size, image_size - requested_size);
         return 1;
     }
 
