@@ -23,10 +23,9 @@
 /* For RENAME_* macros  */
 #include <linux/fs.h>
 #include "common.h"
+#include "mbr.h"
 #include "zealfs_v2.h"
 
-
-#define TARGET_TYPE 0x5A    // 'Z'
 
 /* Cache for the image, as the disk image is at most 64KB, we can allocate it from
  * the heap without a problem. */
@@ -42,6 +41,44 @@ void* content_from_page(ZealFSHeader* header, int page)
     } else {
         return g_image + (page << (8 + header->page_size));
     }
+}
+
+
+/**
+ * @brief Allocate one page in the given header's bitmap.
+ *
+ * @param header File system header to allocate the page from.
+ *
+ * @return Page number on success, 0 on error.
+ */
+static uint16_t allocatePage(ZealFSHeader* header)
+{
+    const int size = header->bitmap_size;
+    int i = 0;
+    uint8_t value = 0;
+    for (i = 0; i < size; i++) {
+        value = header->pages_bitmap[i];
+        if (value != 0xff) {
+            break;
+        }
+    }
+    /* If we've reached the size, the bitmap is full */
+    if (i == size) {
+        printf("No more space in the bitmap of size: %d\n", header->bitmap_size);
+        return 0;
+    }
+    /* Else, return the index */
+    int index_0 = 0;
+    while ((value & 1) != 0) {
+        value >>= 1;
+        index_0++;
+    }
+
+    /* Set the page as allocated in the bitmap */
+    header->pages_bitmap[i] |= 1 << index_0;
+    header->free_pages--;
+
+    return i * 8 + index_0;
 }
 
 
@@ -182,20 +219,37 @@ static int fill_info(struct fuse_file_info * info, uint64_t addr)
  * The file system header, in cache, will be formatted.
  *
  * @param file File descriptor of the opened disk image. It will be truncated to the image size.
+ * @param out_offset Offset of the partition in the disk image.
+ * @param out_size Size of the partition in the disk image.
  *
  * @return 0 on success, error else
  */
-static int format(int file) {
+static int format(int file, off_t* out_offset, int* out_size)
+{
     const int img_fd = common_img_fd();
     const int img_size = common_img_size();
+    const int create_mbr = common_img_mbr();
 
     int err = ftruncate(img_fd, img_size);
     if (err) {
         return err;
     }
 
+    /* Determine the size of the partition depending on whether we want an MBR or not */
+    const int part_offset = create_mbr ? MBR_SIZE : 0;
+    const int part_size = img_size - part_offset;
+    if (create_mbr) {
+        err = mbr_create(g_image, part_offset, part_size);
+        if (err) {
+            printf("ERROR: Failed to create MBR\n");
+            return err;
+        }
+    }
+    *out_offset = part_offset;
+    *out_size = part_size;
+
     /* Initialize image header */
-    ZealFSHeader* header = (ZealFSHeader*) g_image;
+    ZealFSHeader* header = (ZealFSHeader*) (g_image + part_offset);
     header->magic = TARGET_TYPE;
     /* Version 2 supports extended mode */
     header->version = 2;
@@ -203,6 +257,8 @@ static int format(int file) {
     const uint32_t page_size_bytes = pageSizeFromDiskSize(img_size);
     /* The page size in the header is the log2(page_bytes/256) - 1 */
     header->page_size = ((sizeof(int) * 8) - (__builtin_clz(page_size_bytes >> 8))) - 1;
+    /* To prevent loosing 8 pages when an MBR is created, use the iamge size rather than the partition size/
+     * We will mark the last page(s) as allocated in the bitmap */
     header->bitmap_size = img_size / page_size_bytes / 8;
     /* If the page size is 256, there will be only one page for the FAT */
     const int fat_pages_count = 1 + (page_size_bytes == 256 ? 0 : 1);
@@ -210,6 +266,16 @@ static int format(int file) {
     header->free_pages = img_size / page_size_bytes - 1 - fat_pages_count;
     /* All the pages are free (0), mark the first one as occupied */
     header->pages_bitmap[0] = 3 | ((fat_pages_count > 1) ? 4 : 0);
+    /* If an MBR is present, the last page is not available because the MBR takes some space from the partition */
+    if (create_mbr) {
+        /* Calculate the number of pages the MBR takes, rounded up */
+        const int pages_taken = (MBR_SIZE + page_size_bytes - 1) / page_size_bytes;
+        static_assert(MBR_SIZE != 0, "MBR size must not be 0!");
+        assert(pages_taken <= 8);
+        header->free_pages -= pages_taken;
+        /* Modify the last entry in the bitmap to mark the last page(s) as allocated */
+        header->pages_bitmap[header->bitmap_size - 1] = (uint8_t)(0xFF << (8 - pages_taken));
+    }
 
     printf("Bitmap size: %d bytes\n", header->bitmap_size);
     printf("Pages size: %d bytes (code %d)\n", page_size_bytes, ((page_size_bytes >> 8) - 1));
@@ -221,10 +287,9 @@ static int format(int file) {
     lseek(img_fd, 0, SEEK_SET);
     int wr = write(img_fd, g_image, img_size);
     if (wr != img_size) {
-        perror("Header could not be written back");
+        perror("ERROR: Image could not be written back");
         return 1;
     }
-
 
     return 0;
 }
@@ -860,66 +925,6 @@ static void zealfs_destroy(void *private_data)
 
 
 /**
- * @brief Look for a ZealFS partition in the image file. If it has an MBR, it will check the 4 partitions inside,
- * If it's a raw image, it will return sector 0 and the image size.
- */
-#define MBR_SIZE                512
-#define PARTITION_ENTRY_SIZE    16
-#define PARTITION_TABLE_OFFSET  446
-#define PARTITION_TYPE_OFFSET   4
-#define LBA_OFFSET              8
-#define SECTOR_COUNT_OFFSET     12
-#define SECTOR_SIZE             512
-
-int mbr_find_partition(const char* filename, int filesize, off_t* offset, int* size)
-{
-    uint8_t mbr[MBR_SIZE];
-
-    int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        perror("Could not open file");
-        return 0;
-    }
-
-    ssize_t bytes_read = read(fd, mbr, MBR_SIZE);
-    if (bytes_read != MBR_SIZE) {
-        perror("Failed to read MBR");
-        close(fd);
-        return 0;
-    }
-
-    /* Check for MBR signature (0x55AA at offset 510) */
-    if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
-        /* "Invalid MBR signature, check if it's a raw ZealFS image */
-        close(fd);
-        if (mbr[0] == TARGET_TYPE) {
-            *offset = 0;
-            *size = filesize;
-            return 1;
-        }
-        return 0;
-    }
-
-    /* Iterate through the 4 partition entries */
-    for (int i = 0; i < 4; i++) {
-        uint8_t *entry = mbr + PARTITION_TABLE_OFFSET + i * PARTITION_ENTRY_SIZE;
-        uint8_t type = entry[PARTITION_TYPE_OFFSET];
-
-        if (type == TARGET_TYPE) {
-            const uint32_t lba = *(uint32_t *)(entry + LBA_OFFSET);
-            const uint32_t sector_count = *(uint32_t *)(entry + SECTOR_COUNT_OFFSET);
-            *offset = (off_t)lba * SECTOR_SIZE;
-            *size = sector_count * SECTOR_SIZE;
-            close(fd);
-            return 1;
-        }
-    }
-    close(fd);
-    return 0;
-}
-
-
-/**
  * @brief Image init, first function called, right after parsing the command line options
  */
 static int zealfs_image_init(zealfs_context* ctx)
@@ -951,17 +956,15 @@ static int zealfs_image_init(zealfs_context* ctx)
         return 2;
     }
 
-    if (trunc && format(ctx->img_fd)) {
+    if (trunc && format(ctx->img_fd, &ctx->offset, &ctx->size)) {
         perror("Could not set new file size");
         return 3;
     }
 
-    if (!trunc) {
-        /* Seek to the ZealFS partition */
-        assert(lseek(ctx->img_fd, ctx->offset, SEEK_SET) == ctx->offset);
-        int rd = read(ctx->img_fd, g_image, ctx->size);
-        assert(rd == ctx->size);
-    }
+    /* Seek to the ZealFS partition */
+    assert(lseek(ctx->img_fd, ctx->offset, SEEK_SET) == ctx->offset);
+    int rd = read(ctx->img_fd, g_image, ctx->size);
+    assert(rd == ctx->size);
 
     /* Check the integrity of the image */
     if (check_integrity()) {

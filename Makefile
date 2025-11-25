@@ -1,4 +1,4 @@
-SRCS=src/zealfs_main.c src/zealfs_v1.c src/zealfs_v2.c
+SRCS=src/zealfs_main.c src/zealfs_v1.c src/zealfs_v2.c src/mbr.c
 INCLUDE=include/
 BIN=zealfs
 

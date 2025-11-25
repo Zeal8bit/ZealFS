@@ -19,6 +19,9 @@
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
+/* Partition type in the header and the MBR */
+#define TARGET_TYPE 0x5A    // 'Z'
+
 /**
  * @brief Convert a pointer from the image cache to a page number
  */
@@ -166,7 +169,7 @@ static inline void freePage(ZealFSHeader* header, uint16_t page) {
 /**
  * @brief Get the next page of the current from the FAT
  */
-static uint16_t getNextFromFat(uint8_t* img, uint16_t current_page)
+static inline uint16_t getNextFromFat(uint8_t* img, uint16_t current_page)
 {
     const ZealFSHeader* header = (ZealFSHeader*) img;
     const int page_size = getPageSize(header);
@@ -179,50 +182,13 @@ static uint16_t getNextFromFat(uint8_t* img, uint16_t current_page)
 /**
  * @brief Get the next page of the current from the FAT
  */
-static void setNextInFat(uint8_t* img, uint16_t current_page, uint16_t next_page)
+static inline void setNextInFat(uint8_t* img, uint16_t current_page, uint16_t next_page)
 {
     const ZealFSHeader* header = (ZealFSHeader*) img;
     const int page_size = getPageSize(header);
     /* The FAT starts at page 1 */
     uint16_t* fat = (uint16_t*) (img + page_size);
     fat[current_page] = next_page;
-}
-
-
-/**
- * @brief Allocate one page in the given header's bitmap.
- *
- * @param header File system header to allocate the page from.
- *
- * @return Page number on success, 0 on error.
- */
-static uint16_t allocatePage(ZealFSHeader* header) {
-    const int size = header->bitmap_size;
-    int i = 0;
-    uint8_t value = 0;
-    for (i = 0; i < size; i++) {
-        value = header->pages_bitmap[i];
-        if (value != 0xff) {
-            break;
-        }
-    }
-    /* If we've reached the size, the bitmap is full */
-    if (i == size) {
-        printf("No more space in the bitmap of size: %d\n", header->bitmap_size);
-        return 0;
-    }
-    /* Else, return the index */
-    int index_0 = 0;
-    while ((value & 1) != 0) {
-        value >>= 1;
-        index_0++;
-    }
-
-    /* Set the page as allocated in the bitmap */
-    header->pages_bitmap[i] |= 1 << index_0;
-    header->free_pages--;
-
-    return i * 8 + index_0;
 }
 
 

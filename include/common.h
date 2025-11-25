@@ -12,6 +12,7 @@ typedef struct {
     int show_help;
     int v1;
     int v2;
+    int mbr;
     int img_fd;
     off_t offset;
 } zealfs_context;
@@ -28,3 +29,5 @@ int common_img_fd(void);
 int common_img_size(void);
 
 off_t common_img_offset(void);
+
+int common_img_mbr(void);
