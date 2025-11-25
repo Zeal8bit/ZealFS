@@ -238,8 +238,11 @@ static int check_integrity(void)
 {
     ZealFSHeader* header = (ZealFSHeader*) g_image;
     /* Size of the file according to the bitmap */
-    const int image_size = header->bitmap_size * 8 * getPageSize(header);
     const int requested_size = common_img_size();
+    const int image_pages = header->bitmap_size * 8;
+    const int image_size = image_pages * getPageSize(header);
+    const int real_pages  = requested_size / getPageSize(header);
+    const int diff_pages = image_pages - real_pages;
 
     if (header->magic != 'Z') {
         printf("Error: invalid magic header in the image. Corrupted file?\n");
@@ -251,9 +254,9 @@ static int check_integrity(void)
         return 1;
     }
 
-    if (image_size > requested_size) {
-        printf("Error: invalid bitmap size. Header says the image is %d bytes (%d bytes/page) but actual file size is %d\n",
-                image_size, getPageSize(header), requested_size);
+    if (diff_pages < 0 || diff_pages > 7) {
+        printf("Error: invalid bitmap size. Bitmap covers %d pages but partition uses %d pages\n",
+            image_pages, real_pages);
         return 1;
     }
 
@@ -868,7 +871,7 @@ static void zealfs_destroy(void *private_data)
 #define SECTOR_COUNT_OFFSET     12
 #define SECTOR_SIZE             512
 
-int mbr_find_partition(const char* filename, int filesize, off_t *offset, int* size)
+int mbr_find_partition(const char* filename, int filesize, off_t* offset, int* size)
 {
     uint8_t mbr[MBR_SIZE];
 
