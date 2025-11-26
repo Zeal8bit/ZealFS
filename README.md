@@ -92,24 +92,32 @@ Upon success, a new binary is created named `zealfs` by default.
 
 ### Usage
 
-In order to use the file system, you will need a disk image and a mount point. If you don't have any, no worries, the binary will create one. Use the options `--image` and `--size` to choose the destination image and the image size, in KB, respectively. You must also specify the version of ZealFS to use with `-v1` or `-v2`. For example, you can use:
+In order to use the file system, you need a disk image and a mount point.
+If you don’t have a disk image yet, no worries, the binary can create one for you. Use the options `--image` and `--size` to specify the destination image and its size in KB, respectively. You must also choose which version of ZealFS to use with `-v1` or `-v2`. For example:
 
 ```
 ./zealfs --image=my_disk.img --size=64 -v1 my_mount_dir
 ```
 
-This will create a new disk image, that uses ZealFS v1, named `my_disk.img` of size 64KB and mounted in the directory `my_mount_dir` present in the current folder. The binary should show:
+This command creates a new 64 KBdisk image named `my_disk.img`, formatted with ZealFS v1, and mounts it at the directory `my_mount_dir` in the current working directory. The binary should output something like:
 
 ```
 $ mkdir my_mount_dir
-$ ./zealfs --image=my_disk.img --size=64 my_mount_dir
+$ ./zealfs --image=my_disk.img --size=64 -v1 my_mount_dir
 Info: using disk image my_disk.img
-$
 ```
 
-The binary is then running in background, the content of the disk image can be populated or checked either through the terminal or with a GUI file explorer, just like regular file systems.
+When creating a new disk image using ZealFS v2, you can also include a Master Boot Record (MBR) via the `--mbr` option. For example, the following command creates a 4 MB disk image containing an MBR and a ZealFS v2 partition:
 
-You can get all the possible parameters by using command:
+```
+./zealfs --image=my_disk.img -v2 --mbr --size=4096 my_mount_dir
+```
+
+> Note: if the image file already exists, the `--mbr` option is ignored.
+
+Once started, the binary runs in the background. You can populate or inspect the mounted disk image using either a terminal or a graphical file explorer, just like with any regular file system.
+
+To display all available options, use:
 
 ```
 ./zealfs --help
