@@ -175,7 +175,11 @@ static inline uint16_t getNextFromFat(uint8_t* img, uint16_t current_page)
     const int page_size = getPageSize(header);
     /* The FAT starts at page 1 */
     uint16_t* fat = (uint16_t*) (img + page_size);
-    return fat[current_page];
+    if (page_size == 256) {
+        return ((uint8_t*) fat)[current_page];
+    } else {
+        return fat[current_page];
+    }
 }
 
 
@@ -188,7 +192,11 @@ static inline void setNextInFat(uint8_t* img, uint16_t current_page, uint16_t ne
     const int page_size = getPageSize(header);
     /* The FAT starts at page 1 */
     uint16_t* fat = (uint16_t*) (img + page_size);
-    fat[current_page] = next_page;
+    if (page_size == 256) {
+        ((uint8_t*) fat)[current_page] = next_page;
+    } else {
+        fat[current_page] = next_page;
+    }
 }
 
 
